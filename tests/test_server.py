@@ -5,13 +5,14 @@ These tests mock the Stream Deck hardware so they can run without a physical dev
 """
 
 import json
+
+# Mock the StreamDeck module before importing server
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Mock the StreamDeck module before importing server
-import sys
 mock_streamdeck = MagicMock()
 mock_streamdeck.DeviceManager = MagicMock
 mock_streamdeck.ImageHelpers = MagicMock()
@@ -20,10 +21,11 @@ sys.modules["StreamDeck"] = mock_streamdeck
 sys.modules["StreamDeck.DeviceManager"] = mock_streamdeck
 sys.modules["StreamDeck.ImageHelpers"] = mock_streamdeck.ImageHelpers
 
-from server import (  # noqa: E402
-    StreamDeckState,
+from server import (  # noqa: E402,I001
     DeckNotConnectedError,
+    StreamDeckState,
     ValidationError,
+    subprocess as server_subprocess,
 )
 
 
@@ -58,13 +60,21 @@ class TestStreamDeckState:
         buttons_file = temp_config_dir / "buttons.json"
 
         # Write existing state
-        pages_file.write_text(json.dumps({
-            "main": {"0": {"text": "Hello"}},
-            "gaming": {},
-        }))
-        buttons_file.write_text(json.dumps({
-            "main": {"0": {"action": "page:gaming"}},
-        }))
+        pages_file.write_text(
+            json.dumps(
+                {
+                    "main": {"0": {"text": "Hello"}},
+                    "gaming": {},
+                }
+            )
+        )
+        buttons_file.write_text(
+            json.dumps(
+                {
+                    "main": {"0": {"action": "page:gaming"}},
+                }
+            )
+        )
 
         with patch("server.CONFIG_DIR", temp_config_dir):
             with patch("server.PAGES_FILE", pages_file):
@@ -240,6 +250,19 @@ class TestStreamDeckState:
         """Should reject empty actions."""
         with pytest.raises(ValidationError, match="cannot be empty"):
             state.set_button_action(0, "")
+
+    def test_key_callback_executes_commands_without_shell(self, state: StreamDeckState):
+        """Commands should be tokenized and executed without a shell."""
+        state.button_callbacks["main"] = {"0": {"action": "echo 'hello world'", "type": "command"}}
+
+        with patch("server.subprocess.Popen") as mock_popen:
+            state._key_callback(deck=MagicMock(), key=0, state=True)
+
+        args, kwargs = mock_popen.call_args
+        assert args[0] == ["echo", "hello world"]
+        assert kwargs["shell"] is False
+        assert kwargs["stdout"] is server_subprocess.DEVNULL
+        assert kwargs["stderr"] is server_subprocess.DEVNULL
 
     # ========================================================================
     # State Persistence Tests

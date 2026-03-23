@@ -10,14 +10,15 @@ import asyncio
 import json
 import logging
 import re
+import shlex
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from mcp.types import TextContent, Tool
 
 # Configure logging
 logging.basicConfig(
@@ -30,6 +31,7 @@ logger = logging.getLogger("streamdeck-mcp")
 # Optional: Pillow for image generation
 try:
     from PIL import Image, ImageDraw, ImageFont
+
     HAS_PILLOW = True
 except ImportError:
     HAS_PILLOW = False
@@ -39,6 +41,7 @@ except ImportError:
 try:
     from StreamDeck.DeviceManager import DeviceManager
     from StreamDeck.ImageHelpers import PILHelper
+
     HAS_STREAMDECK = True
 except ImportError:
     HAS_STREAMDECK = False
@@ -70,29 +73,35 @@ RECONNECT_DELAY_BASE = 1.0  # seconds
 # Exceptions
 # ============================================================================
 
+
 class StreamDeckError(Exception):
     """Base exception for Stream Deck operations."""
+
     pass
 
 
 class DeckNotConnectedError(StreamDeckError):
     """Raised when deck is not connected."""
+
     pass
 
 
 class DeckDisconnectedError(StreamDeckError):
     """Raised when deck becomes disconnected during operation."""
+
     pass
 
 
 class ValidationError(StreamDeckError):
     """Raised when input validation fails."""
+
     pass
 
 
 # ============================================================================
 # State Management
 # ============================================================================
+
 
 class StreamDeckState:
     """
@@ -175,7 +184,9 @@ class StreamDeckState:
         if self.deck:
             max_keys = self.deck.key_count()
             if key >= max_keys:
-                raise ValidationError(f"Key {key} out of range. This deck has {max_keys} keys (0-{max_keys - 1})")
+                raise ValidationError(
+                    f"Key {key} out of range. This deck has {max_keys} keys (0-{max_keys - 1})"
+                )
 
     def _validate_page_name(self, name: str) -> None:
         """
@@ -194,7 +205,9 @@ class StreamDeckState:
             raise ValidationError(f"Page name too long (max {MAX_PAGE_NAME_LENGTH} characters)")
 
         if not PAGE_NAME_PATTERN.match(name):
-            raise ValidationError("Page name can only contain letters, numbers, underscores, hyphens, and spaces")
+            raise ValidationError(
+                "Page name can only contain letters, numbers, underscores, hyphens, and spaces"
+            )
 
     def _validate_color(self, color: tuple[int, ...], name: str = "color") -> tuple[int, int, int]:
         """
@@ -241,7 +254,9 @@ class StreamDeckState:
         except Exception as e:
             logger.error(f"Deck became unresponsive: {e}")
             self.deck = None
-            raise DeckDisconnectedError("Stream Deck disconnected. Reconnect with streamdeck_connect.")
+            raise DeckDisconnectedError(
+                "Stream Deck disconnected. Reconnect with streamdeck_connect."
+            )
 
     def connect(self) -> dict[str, Any]:
         """
@@ -271,9 +286,7 @@ class StreamDeckState:
             raise StreamDeckError(f"Failed to scan for Stream Deck devices: {e}")
 
         if not decks:
-            raise StreamDeckError(
-                "No Stream Deck found. Check USB connection and permissions."
-            )
+            raise StreamDeckError("No Stream Deck found. Check USB connection and permissions.")
 
         try:
             self.deck = decks[0]
@@ -283,7 +296,9 @@ class StreamDeckState:
             self.deck.set_key_callback(self._key_callback)
 
             self._connect_attempts = 0
-            logger.info(f"Connected to {self.deck.deck_type()} (serial: {self.deck.get_serial_number()})")
+            logger.info(
+                f"Connected to {self.deck.deck_type()} (serial: {self.deck.get_serial_number()})"
+            )
 
             # Render current page after connecting
             self._render_current_page()
@@ -333,11 +348,14 @@ class StreamDeckState:
                 self.switch_page(new_page)
                 logger.info(f"Switched to page '{new_page}'")
             elif action_type == "command":
-                # Shell command execution
+                # Execute argv-style commands to avoid shell injection.
                 logger.info(f"Executing command: {action}")
+                parsed_action = shlex.split(action)
+                if not parsed_action:
+                    raise ValidationError("Button action command cannot be empty.")
                 subprocess.Popen(
-                    action,
-                    shell=True,
+                    parsed_action,
+                    shell=False,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
@@ -380,8 +398,8 @@ class StreamDeckState:
     def set_button_image(
         self,
         key: int,
-        image_path: Optional[str] = None,
-        text: Optional[str] = None,
+        image_path: str | None = None,
+        text: str | None = None,
         bg_color: tuple[int, int, int] = DEFAULT_BG_COLOR,
         text_color: tuple[int, int, int] = DEFAULT_TEXT_COLOR,
         font_size: int = 14,
@@ -489,7 +507,7 @@ class StreamDeckState:
 
         font_paths = [
             "/System/Library/Fonts/Helvetica.ttc",  # macOS
-            "/System/Library/Fonts/SFNSText.ttf",   # macOS newer
+            "/System/Library/Fonts/SFNSText.ttf",  # macOS newer
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  # Linux
             "/usr/share/fonts/TTF/DejaVuSans.ttf",  # Arch Linux
             "C:/Windows/Fonts/arial.ttf",  # Windows
@@ -500,7 +518,7 @@ class StreamDeckState:
                 font = ImageFont.truetype(font_path, size)
                 self._font_cache[size] = font
                 return font
-            except (OSError, IOError):
+            except OSError:
                 continue
 
         # Fallback to default font (fixed size, doesn't respect size parameter)
@@ -843,7 +861,10 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="streamdeck_info",
-            description="Get info about the connected Stream Deck (model, key count, current page, etc.)",
+            description=(
+                "Get info about the connected Stream Deck, "
+                "including model, key count, and current page."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -851,7 +872,10 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="streamdeck_set_button",
-            description="Set a button's appearance and optional action. Use text for labels or image_path for icons (optimal: 72x72 pixels).",
+            description=(
+                "Set a button's appearance and optional action. "
+                "Use text for labels or image_path for icons."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -865,7 +889,10 @@ async def list_tools() -> list[Tool]:
                     },
                     "image_path": {
                         "type": "string",
-                        "description": "Path to image file (PNG/JPG) to display. Optimal size: 72x72 pixels.",
+                        "description": (
+                            "Path to an image file to display. "
+                            "PNG or JPG work well; 72x72 is ideal."
+                        ),
                     },
                     "bg_color": {
                         "type": "array",
@@ -883,7 +910,10 @@ async def list_tools() -> list[Tool]:
                     },
                     "action": {
                         "type": "string",
-                        "description": "Action when pressed. Use 'page:name' to switch pages, or a shell command.",
+                        "description": (
+                            "Action when pressed. Use 'page:name' "
+                            "to switch pages, or provide a shell command."
+                        ),
                     },
                 },
                 "required": ["key"],
@@ -891,7 +921,9 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="streamdeck_set_buttons",
-            description="Set multiple buttons at once (faster than individual calls). Use for bulk configuration.",
+            description=(
+                "Set multiple buttons at once. This is faster than individual button calls."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1057,19 +1089,26 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     try:
         if name == "streamdeck_connect":
             if not HAS_STREAMDECK:
-                return [TextContent(
-                    type="text",
-                    text="❌ streamdeck library not installed. Run: pip install streamdeck pillow"
-                )]
+                return [
+                    TextContent(
+                        type="text",
+                        text=(
+                            "❌ streamdeck library not installed. "
+                            "Run: pip install streamdeck pillow"
+                        ),
+                    )
+                ]
 
             info = state.connect()
-            return [TextContent(
-                type="text",
-                text=f"✅ Connected to {info['type']}\n"
-                     f"   Serial: {info['serial']}\n"
-                     f"   Keys: {info['key_count']} ({info['columns']}x{info['rows']})\n"
-                     f"   Firmware: {info['firmware']}"
-            )]
+            return [
+                TextContent(
+                    type="text",
+                    text=f"✅ Connected to {info['type']}\n"
+                    f"   Serial: {info['serial']}\n"
+                    f"   Keys: {info['key_count']} ({info['columns']}x{info['rows']})\n"
+                    f"   Firmware: {info['firmware']}",
+                )
+            ]
 
         elif name == "streamdeck_info":
             info = state.get_deck_info()
@@ -1169,5 +1208,10 @@ async def main() -> None:
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
-if __name__ == "__main__":
+def run() -> None:
+    """Synchronous wrapper for package entrypoints."""
     asyncio.run(main())
+
+
+if __name__ == "__main__":
+    run()
