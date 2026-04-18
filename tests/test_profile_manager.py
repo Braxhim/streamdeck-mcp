@@ -873,6 +873,38 @@ def test_install_mcp_plugin_idempotent(tmp_path: Path, monkeypatch: pytest.Monke
     assert forced["installed"] is True
 
 
+def test_install_mcp_plugin_upgrades_outdated_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ensure_mcp_plugin_installed reinstalls when the installed manifest version is older."""
+    import json as _json
+
+    from profile_manager import ensure_mcp_plugin_installed
+    from streamdeck_plugin import PLUGIN_DIR_NAME
+
+    plugins_dir = tmp_path / "plugins"
+    monkeypatch.setattr("profile_manager.get_plugins_dir", lambda: plugins_dir)
+
+    # Install the current version first.
+    ensure_mcp_plugin_installed()
+
+    # Simulate an older installed version by overwriting the manifest version.
+    manifest_path = plugins_dir / PLUGIN_DIR_NAME / "manifest.json"
+    manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["Version"] = "0.0.1"
+    manifest_path.write_text(_json.dumps(manifest), encoding="utf-8")
+
+    # Should detect the version mismatch and reinstall.
+    result = ensure_mcp_plugin_installed()
+    assert result["installed"] is True
+
+    # Reinstalled manifest should now carry the current bundled version.
+    from streamdeck_plugin import PLUGIN_VERSION
+
+    reinstalled_version = _json.loads(manifest_path.read_text(encoding="utf-8")).get("Version")
+    assert reinstalled_version == PLUGIN_VERSION
+
+
 def test_write_page_encoder_writes_encoder_icon_and_background(
     sample_profiles_plus_xl: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -969,6 +1001,196 @@ def test_write_page_auto_installs_mcp_plugin_for_encoder_default(
         page_index=0,
         buttons=[
             {"controller": "encoder", "key": 0, "icon_path": icon["path"], "title": "V"}
+        ],
+        clear_existing=False,
+    )
+    assert result["mcp_plugin_install"]["installed"] is True
+    assert (plugins_dir / PLUGIN_DIR_NAME / "manifest.json").exists()
+
+
+def _read_plus_xl_encoder_action(profiles_dir: Path, key: str) -> dict:
+    raw = json.loads(
+        (
+            profiles_dir
+            / "PLUSXL.sdProfile"
+            / "Profiles"
+            / "DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD"
+            / "manifest.json"
+        ).read_text()
+    )
+    encoder_actions = next(
+        c["Actions"] for c in raw["Controllers"] if c["Type"] == "Encoder"
+    )
+    return encoder_actions[key]
+
+
+def test_write_page_encoder_layout_routes_to_variant_uuid(
+    sample_profiles_plus_xl: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from streamdeck_plugin import LAYOUT_ACTION_UUIDS, PLUGIN_UUID
+
+    monkeypatch.setattr("profile_manager.get_plugins_dir", lambda: tmp_path / "plugins")
+    manager = ProfileManager(
+        profiles_dir=sample_profiles_plus_xl,
+        scripts_dir=tmp_path / "scripts",
+        generated_icons_dir=tmp_path / "icons",
+    )
+    icon = manager.create_icon(icon="mdi:volume-high", filename="vol")
+
+    manager.write_page(
+        profile_name="Plus XL",
+        page_index=0,
+        buttons=[
+            {
+                "controller": "encoder",
+                "key": 0,
+                "icon_path": icon["path"],
+                "title": "Volume",
+                "encoder_layout": "$A1",
+            }
+        ],
+        clear_existing=False,
+    )
+
+    action = _read_plus_xl_encoder_action(sample_profiles_plus_xl, "0,0")
+    assert action["UUID"] == LAYOUT_ACTION_UUIDS["$A1"]
+    assert action["Plugin"]["UUID"] == PLUGIN_UUID
+    assert action["Encoder"]["Icon"].startswith("Images/")
+
+
+def test_write_page_encoder_layout_default_uses_default_uuid(
+    sample_profiles_plus_xl: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from streamdeck_plugin import DEFAULT_ACTION_UUID
+
+    monkeypatch.setattr("profile_manager.get_plugins_dir", lambda: tmp_path / "plugins")
+    manager = ProfileManager(
+        profiles_dir=sample_profiles_plus_xl,
+        scripts_dir=tmp_path / "scripts",
+        generated_icons_dir=tmp_path / "icons",
+    )
+    icon = manager.create_icon(icon="mdi:volume-high", filename="vol")
+
+    manager.write_page(
+        profile_name="Plus XL",
+        page_index=0,
+        buttons=[
+            {
+                "controller": "encoder",
+                "key": 0,
+                "icon_path": icon["path"],
+                "title": "Volume",
+            }
+        ],
+        clear_existing=False,
+    )
+
+    action = _read_plus_xl_encoder_action(sample_profiles_plus_xl, "0,0")
+    assert action["UUID"] == DEFAULT_ACTION_UUID
+
+
+def test_write_page_rejects_unknown_encoder_layout(
+    sample_profiles_plus_xl: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("profile_manager.get_plugins_dir", lambda: tmp_path / "plugins")
+    manager = ProfileManager(
+        profiles_dir=sample_profiles_plus_xl,
+        scripts_dir=tmp_path / "scripts",
+        generated_icons_dir=tmp_path / "icons",
+    )
+
+    with pytest.raises(ProfileValidationError, match=r"\$A1"):
+        manager.write_page(
+            profile_name="Plus XL",
+            page_index=0,
+            buttons=[
+                {
+                    "controller": "encoder",
+                    "key": 0,
+                    "title": "Nope",
+                    "encoder_layout": "$Z9",
+                }
+            ],
+            clear_existing=False,
+        )
+
+
+def test_write_page_rejects_encoder_layout_on_keypad(
+    sample_profiles_v3: Path, tmp_path: Path
+) -> None:
+    manager = ProfileManager(
+        profiles_dir=sample_profiles_v3,
+        scripts_dir=tmp_path / "scripts",
+        generated_icons_dir=tmp_path / "icons",
+    )
+
+    # With other action fields: should raise encoder-only error, not "do not combine".
+    with pytest.raises(ProfileValidationError, match="encoder_layout is only valid"):
+        manager.write_page(
+            profile_name="Default Profile",
+            directory_id="BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB",
+            buttons=[
+                {
+                    "key": 0,
+                    "title": "Nope",
+                    "encoder_layout": "$A1",
+                    "action_type": "next_page",
+                }
+            ],
+        )
+
+
+def test_write_page_rejects_encoder_layout_on_keypad_no_other_fields(
+    sample_profiles_v3: Path, tmp_path: Path
+) -> None:
+    """encoder_layout on a keypad button with no other action fields must raise the
+    encoder-only error, not the generic 'Button needs either...' error."""
+    manager = ProfileManager(
+        profiles_dir=sample_profiles_v3,
+        scripts_dir=tmp_path / "scripts",
+        generated_icons_dir=tmp_path / "icons",
+    )
+
+    with pytest.raises(ProfileValidationError, match="encoder_layout is only valid"):
+        manager.write_page(
+            profile_name="Default Profile",
+            directory_id="BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB",
+            buttons=[
+                {
+                    "key": 0,
+                    "title": "Nope",
+                    "encoder_layout": "$A1",
+                }
+            ],
+        )
+
+
+def test_write_page_auto_installs_mcp_plugin_for_layout_variant(
+    sample_profiles_plus_xl: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from streamdeck_plugin import PLUGIN_DIR_NAME
+
+    plugins_dir = tmp_path / "plugins"
+    monkeypatch.setattr("profile_manager.get_plugins_dir", lambda: plugins_dir)
+
+    manager = ProfileManager(
+        profiles_dir=sample_profiles_plus_xl,
+        scripts_dir=tmp_path / "scripts",
+        generated_icons_dir=tmp_path / "icons",
+    )
+    icon = manager.create_icon(icon="mdi:volume-high", filename="vol")
+
+    result = manager.write_page(
+        profile_name="Plus XL",
+        page_index=0,
+        buttons=[
+            {
+                "controller": "encoder",
+                "key": 0,
+                "icon_path": icon["path"],
+                "title": "V",
+                "encoder_layout": "$B1",
+            }
         ],
         clear_existing=False,
     )
